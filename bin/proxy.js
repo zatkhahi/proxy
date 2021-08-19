@@ -122,7 +122,7 @@ if (authenticate) {
  * Bind to port.
  */
 
-proxy.listen(port, function() {
+proxy.listen(port, '0.0.0.0', function() {
 	console.log(
 		'HTTP(s) proxy server listening on port %d',
 		this.address().port

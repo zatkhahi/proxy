@@ -7,12 +7,17 @@ var url = require('url');
 var http = require('http');
 var assert = require('assert');
 var debug = require('debug')('proxy');
+const basicAuthParser = require('basic-auth-parser');
+var users_ = require('./users.json');
+var users = users_.map(function(s) { return { username: s.username, password: Buffer.from(s.password, 'base64').toString() } });
+//import users from ('./users.json');
 
 // log levels
 debug.request = require('debug')('proxy ← ← ←');
 debug.response = require('debug')('proxy → → →');
 debug.proxyRequest = require('debug')('proxy ↑ ↑ ↑');
 debug.proxyResponse = require('debug')('proxy ↓ ↓ ↓');
+
 
 // hostname
 var hostname = require('os').hostname();
@@ -77,7 +82,7 @@ function eachHeader(obj, fn) {
 		// ideal scenario... >= node v0.11.x
 		// every even entry is a "key", every odd entry is a "value"
 		var key = null;
-		obj.rawHeaders.forEach(function(v) {
+		obj.rawHeaders.forEach(function (v) {
 			if (key === null) {
 				key = v;
 			} else {
@@ -89,11 +94,11 @@ function eachHeader(obj, fn) {
 		// otherwise we can *only* proxy the header names as lowercase'd
 		var headers = obj.headers;
 		if (!headers) return;
-		Object.keys(headers).forEach(function(key) {
+		Object.keys(headers).forEach(function (key) {
 			var value = headers[key];
 			if (Array.isArray(value)) {
 				// set-cookie
-				value.forEach(function(val) {
+				value.forEach(function (val) {
 					fn(key, val);
 				});
 			} else {
@@ -115,7 +120,7 @@ function onrequest(req, res) {
 	// pause the socket during authentication so no data is lost
 	socket.pause();
 
-	authenticate(server, req, function(err, auth) {
+	authenticate(server, req, function (err, auth, u) {
 		socket.resume();
 		if (err) {
 			// an error occured during login!
@@ -124,6 +129,7 @@ function onrequest(req, res) {
 			return;
 		}
 		if (!auth) return requestAuthorization(req, res);
+		user = u;
 		var parsed = url.parse(req.url);
 
 		// proxy the request HTTP method
@@ -136,7 +142,7 @@ function onrequest(req, res) {
 		var via = '1.1 ' + hostname + ' (proxy/' + version + ')';
 
 		parsed.headers = headers;
-		eachHeader(req, function(key, value) {
+		eachHeader(req, function (key, value) {
 			debug.request('Request Header: "%s: %s"', key, value);
 			var keyLower = key.toLowerCase();
 
@@ -225,12 +231,12 @@ function onrequest(req, res) {
 		var proxyReq = http.request(parsed);
 		debug.proxyRequest('%s %s HTTP/1.1 ', proxyReq.method, proxyReq.path);
 
-		proxyReq.on('response', function(proxyRes) {
+		proxyReq.on('response', function (proxyRes) {
 			debug.proxyResponse('HTTP/1.1 %s', proxyRes.statusCode);
 			gotResponse = true;
 
 			var headers = {};
-			eachHeader(proxyRes, function(key, value) {
+			eachHeader(proxyRes, function (key, value) {
 				debug.proxyResponse(
 					'Proxy Response Header: "%s: %s"',
 					key,
@@ -252,10 +258,13 @@ function onrequest(req, res) {
 
 			debug.response('HTTP/1.1 %s', proxyRes.statusCode);
 			res.writeHead(proxyRes.statusCode, headers);
+			proxyRes.on('data', (data) => {
+				console.log('UP2', user?.username, data.byteLength);
+			});
 			proxyRes.pipe(res);
 			res.on('finish', onfinish);
 		});
-		proxyReq.on('error', function(err) {
+		proxyReq.on('error', function (err) {
 			debug.proxyResponse(
 				'proxy HTTP request "error" event\n%s',
 				err.stack || err
@@ -299,7 +308,9 @@ function onrequest(req, res) {
 			socket.removeListener('close', onclose);
 			res.removeListener('finish', onfinish);
 		}
-
+		req.on('data', (data) => {
+			console.log('DN2', user?.username, data.byteLength);
+		});
 		req.pipe(proxyReq);
 	});
 }
@@ -318,6 +329,7 @@ function onconnect(req, socket, head) {
 	var res;
 	var target;
 	var gotResponse = false;
+	var user;
 
 	// define request socket event listeners
 	socket.on('close', function onclientclose() {
@@ -384,6 +396,12 @@ function onconnect(req, socket, head) {
 		// up before this socket proxying is completed
 		res = null;
 
+		socket.on('data', (data) => {
+			console.log('UP', user?.username, data.byteLength);
+		});
+		target.on('data', (data) => {
+			console.log('DN', user?.username, data.byteLength);
+		});
 		socket.pipe(target);
 		target.pipe(socket);
 	}
@@ -412,7 +430,7 @@ function onconnect(req, socket, head) {
 	// pause the socket during authentication so no data is lost
 	socket.pause();
 
-	authenticate(this, req, function(err, auth) {
+	authenticate(this, req, function (err, auth, u) {
 		socket.resume();
 		if (err) {
 			// an error occured during login!
@@ -422,6 +440,7 @@ function onconnect(req, socket, head) {
 		}
 		if (!auth) return requestAuthorization(req, res);
 
+		user = u;
 		var parts = req.url.split(':');
 		var host = parts[0];
 		var port = +parts[1];
@@ -447,15 +466,34 @@ function onconnect(req, socket, head) {
  */
 
 function authenticate(server, req, fn) {
-	var hasAuthenticate = 'function' == typeof server.authenticate;
-	if (hasAuthenticate) {
-		debug.request('authenticating request "%s %s"', req.method, req.url);
-		server.authenticate(req, fn);
-	} else {
-		// no `server.authenticate()` function, so just allow the request
-		fn(null, true);
+	if (req.connection.remoteAddress == '127.0.0.1') {
+		return fn(null, true, {username: 'server'});
 	}
+	var auth = req.headers['proxy-authorization'];
+	if (!auth) {
+		// optimization: don't invoke the child process if no
+		// "Proxy-Authorization" header was given
+		return fn(null, false);
+	}
+	var parsed = basicAuthParser(auth);
+	debug('parsed "Proxy-Authorization": %j', parsed);
+	let userIndex = users.findIndex((s) => s.username == parsed.username && s.password == parsed.password);
+	if (userIndex === -1) {
+		return fn(null, false); 
+	}
+	user = users[userIndex];
+	return fn(null, true, user);
+
+	// var hasAuthenticate = 'function' == typeof server.authenticate;
+	// if (hasAuthenticate) {
+	// 	debug.request('authenticating request "%s %s"', req.method, req.url);
+	// 	server.authenticate(req, fn);
+	// } else {
+	// 	// no `server.authenticate()` function, so just allow the request
+	// 	fn(null, true);
+	// }
 }
+
 
 /**
  * Sends a "407 Proxy Authentication Required" HTTP response to the `socket`.
@@ -472,10 +510,11 @@ function requestAuthorization(req, res) {
 	);
 
 	// TODO: make "realm" and "type" (Basic) be configurable...
-	var realm = 'proxy';
+	var realm = 'INPROC proxy server authorization';
 
 	var headers = {
-		'Proxy-Authenticate': 'Basic realm="' + realm + '"'
+		'Proxy-Authenticate': 'Basic realm="' + realm + '"',
+		'Server': 'Proxy'
 	};
 	res.writeHead(407, headers);
 	res.end();
