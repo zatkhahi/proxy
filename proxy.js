@@ -6,11 +6,29 @@ var net = require('net');
 var url = require('url');
 var http = require('http');
 var assert = require('assert');
+var Netmask = require('netmask').Netmask;
+
+var localNet = new Netmask('192.168.0.1/24');
+// console.log(localNet.last);
+
+
+// for debug command line set:
+// set DEBUG=*,-not_this
+//
 var debug = require('debug')('proxy');
 var fs = require('fs');
 const basicAuthParser = require('basic-auth-parser');
 var users_ = require('./bin/users.json');
-var users = users_.map(function(s) { return { username: s.username, password: Buffer.from(s.password, 'base64').toString(), usage: 0, staticIP: s.staticIP } });
+var users = users_.map(function (s) {
+    return {
+        username: s.username, password: Buffer.from(s.password, 'base64').toString(),
+        upload: 0,
+        download: 0,
+        localUpload: 0,
+        localDownload: 0,
+        staticIP: s.staticIP
+    }
+});
 //import users from ('./users.json');
 var remoteBindings = ["192.168.0.117", "192.168.43.68"];
 // var remoteBindings = ["192.168.43.68"];
@@ -22,6 +40,8 @@ debug.response = require('debug')('proxy → → →');
 debug.proxyRequest = require('debug')('proxy ↑ ↑ ↑');
 debug.proxyResponse = require('debug')('proxy ↓ ↓ ↓');
 
+
+const p2e = s => s.replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
 
 // hostname
 var hostname = require('os').hostname();
@@ -86,7 +106,7 @@ function eachHeader(obj, fn) {
         // ideal scenario... >= node v0.11.x
         // every even entry is a "key", every odd entry is a "value"
         var key = null;
-        obj.rawHeaders.forEach(function(v) {
+        obj.rawHeaders.forEach(function (v) {
             if (key === null) {
                 key = v;
             } else {
@@ -98,11 +118,11 @@ function eachHeader(obj, fn) {
         // otherwise we can *only* proxy the header names as lowercase'd
         var headers = obj.headers;
         if (!headers) return;
-        Object.keys(headers).forEach(function(key) {
+        Object.keys(headers).forEach(function (key) {
             var value = headers[key];
             if (Array.isArray(value)) {
                 // set-cookie
-                value.forEach(function(val) {
+                value.forEach(function (val) {
                     fn(key, val);
                 });
             } else {
@@ -124,7 +144,7 @@ function onrequest(req, res) {
     // pause the socket during authentication so no data is lost
     socket.pause();
 
-    authenticate(server, req, function(err, auth, u) {
+    authenticate(server, req, function (err, auth, u) {
         socket.resume();
         if (err) {
             // an error occured during login!
@@ -146,7 +166,7 @@ function onrequest(req, res) {
         var via = '1.1 ' + hostname + ' (proxy/' + version + ')';
 
         parsed.headers = headers;
-        eachHeader(req, function(key, value) {
+        eachHeader(req, function (key, value) {
             debug.request('Request Header: "%s: %s"', key, value);
             var keyLower = key.toLowerCase();
 
@@ -235,12 +255,12 @@ function onrequest(req, res) {
         var proxyReq = http.request(parsed);
         debug.proxyRequest('%s %s HTTP/1.1 ', proxyReq.method, proxyReq.path);
 
-        proxyReq.on('response', function(proxyRes) {
+        proxyReq.on('response', function (proxyRes) {
             debug.proxyResponse('HTTP/1.1 %s', proxyRes.statusCode);
             gotResponse = true;
 
             var headers = {};
-            eachHeader(proxyRes, function(key, value) {
+            eachHeader(proxyRes, function (key, value) {
                 debug.proxyResponse(
                     'Proxy Response Header: "%s: %s"',
                     key,
@@ -268,7 +288,7 @@ function onrequest(req, res) {
             proxyRes.pipe(res);
             res.on('finish', onfinish);
         });
-        proxyReq.on('error', function(err) {
+        proxyReq.on('error', function (err) {
             debug.proxyResponse(
                 'proxy HTTP request "error" event\n%s',
                 err.stack || err
@@ -401,12 +421,10 @@ function onconnect(req, socket, head) {
         res = null;
 
         socket.on('data', (data) => {
-            user.usage = user.usage + data.byteLength;
-            debug('UP', user?.username, user.usage);
+            addUserTraffic(user, target, data.byteLength, true);
         });
         target.on('data', (data) => {
-            user.usage = user.usage + data.byteLength;
-            debug('DN', user?.username, user.usage);
+            addUserTraffic(user, target, data.byteLength, false);
         });
         socket.pipe(target);
         target.pipe(socket);
@@ -436,7 +454,7 @@ function onconnect(req, socket, head) {
     // pause the socket during authentication so no data is lost
     socket.pause();
 
-    authenticate(this, req, function(err, auth, u) {
+    authenticate(this, req, function (err, auth, u) {
         socket.resume();
         if (err) {
             // an error occured during login!
@@ -458,7 +476,7 @@ function onconnect(req, socket, head) {
             const rndInt = Math.floor(Math.random() * remoteBindings.length);
             opts.localAddress = remoteBindings[rndInt];
         }
-        debug.proxyRequest('connecting to proxy target %j', opts);        
+        debug.proxyRequest('connecting to proxy target %j', opts);
         target = net.connect(opts);
         target.on('connect', ontargetconnect);
         target.on('close', ontargetclose);
@@ -538,7 +556,34 @@ function requestAuthorization(req, res) {
 }
 
 setInterval(() => {
-    let  stats = users.map((s) =>{ return {username: s.username, usage: s.usage} });
+    let stats = users.map((s) => { const { password, staticIP, ...re } = s; return re; });
     let json = JSON.stringify(stats);
-    fs.writeFileSync('./bin/usage/users-stats.json', json, 'utf8');    
-}, 30000);
+    let today = new Date().toLocaleDateString('fa-IR', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    // console.log(p2e(today.split('/').join('-')));    
+    const filename = p2e(today.split('/').join('-')) + '.json';
+    fs.writeFileSync('./bin/usage/' + filename, json, 'utf8');
+}, 3000);
+
+function addUserTraffic(user, targetSock, bytesLength, isUpload) {
+    let isLocal = targetSock.remoteAddress == 'sepdco' ||
+        localNet.contains(targetSock.remoteAddress);
+    if (isLocal) {
+        if (isUpload) {
+            user.localUpload += bytesLength;
+        }
+        else {
+            user.localDownload += bytesLength;
+        }
+    }
+    else {
+        if (isUpload) {
+            user.upload += bytesLength;
+        }
+        else {
+            user.download += bytesLength;
+        }
+    }
+    debug(isUpload ? 'UP' : 'DN', isLocal ? 'Local' : 'NET', user.username, bytesLength);
+}
+
+
