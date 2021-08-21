@@ -4,3 +4,4 @@
 
 bin/users.json
 bin/usage/*
+*.log

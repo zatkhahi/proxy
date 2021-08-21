@@ -4,7 +4,8 @@ var Service = require('node-windows').Service;
 var svc = new Service({
   name:'InternetProxy',
   description: 'INPROC Internet Proxy server',
-  script: 'F:\\Projects\\Proxy\\bin\\proxy.js'
+  script: 'F:\\Projects\\Proxy\\bin\\proxy.js',
+  workingDirectory: 'F:\\Projects\\Proxy'
 });
 
 // Listen for the "install" event, which indicates the

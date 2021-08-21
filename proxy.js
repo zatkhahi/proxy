@@ -30,9 +30,9 @@ var users = users_.map(function (s) {
     }
 });
 //import users from ('./users.json');
-var remoteBindings = ["192.168.0.117", "192.168.43.68"];
+// var remoteBindings = ["192.168.0.117", "192.168.43.68"];
 // var remoteBindings = ["192.168.43.68"];
-// var remoteBindings = ["192.168.0.117"];
+ var remoteBindings = ["192.168.0.117"];
 
 // log levels
 debug.request = require('debug')('proxy ← ← ←');
