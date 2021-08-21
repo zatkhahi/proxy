@@ -7,10 +7,14 @@ var url = require('url');
 var http = require('http');
 var assert = require('assert');
 var debug = require('debug')('proxy');
+var fs = require('fs');
 const basicAuthParser = require('basic-auth-parser');
-var users_ = require('./users.json');
-var users = users_.map(function(s) { return { username: s.username, password: Buffer.from(s.password, 'base64').toString() } });
+var users_ = require('./bin/users.json');
+var users = users_.map(function(s) { return { username: s.username, password: Buffer.from(s.password, 'base64').toString(), usage: 0, staticIP: s.staticIP } });
 //import users from ('./users.json');
+var remoteBindings = ["192.168.0.117", "192.168.43.68"];
+// var remoteBindings = ["192.168.43.68"];
+// var remoteBindings = ["192.168.0.117"];
 
 // log levels
 debug.request = require('debug')('proxy ← ← ←');
@@ -42,10 +46,10 @@ module.exports = setup;
  */
 
 function setup(server, options) {
-	if (!server) server = http.createServer();
-	server.on('request', onrequest);
-	server.on('connect', onconnect);
-	return server;
+    if (!server) server = http.createServer();
+    server.on('request', onrequest);
+    server.on('connect', onconnect);
+    return server;
 }
 
 /**
@@ -57,14 +61,14 @@ function setup(server, options) {
  */
 
 var hopByHopHeaders = [
-	'Connection',
-	'Keep-Alive',
-	'Proxy-Authenticate',
-	'Proxy-Authorization',
-	'TE',
-	'Trailers',
-	'Transfer-Encoding',
-	'Upgrade'
+    'Connection',
+    'Keep-Alive',
+    'Proxy-Authenticate',
+    'Proxy-Authorization',
+    'TE',
+    'Trailers',
+    'Transfer-Encoding',
+    'Upgrade'
 ];
 
 // create a case-insensitive RegExp to match "hop by hop" headers
@@ -78,34 +82,34 @@ var isHopByHop = new RegExp('^(' + hopByHopHeaders.join('|') + ')$', 'i');
  */
 
 function eachHeader(obj, fn) {
-	if (Array.isArray(obj.rawHeaders)) {
-		// ideal scenario... >= node v0.11.x
-		// every even entry is a "key", every odd entry is a "value"
-		var key = null;
-		obj.rawHeaders.forEach(function (v) {
-			if (key === null) {
-				key = v;
-			} else {
-				fn(key, v);
-				key = null;
-			}
-		});
-	} else {
-		// otherwise we can *only* proxy the header names as lowercase'd
-		var headers = obj.headers;
-		if (!headers) return;
-		Object.keys(headers).forEach(function (key) {
-			var value = headers[key];
-			if (Array.isArray(value)) {
-				// set-cookie
-				value.forEach(function (val) {
-					fn(key, val);
-				});
-			} else {
-				fn(key, value);
-			}
-		});
-	}
+    if (Array.isArray(obj.rawHeaders)) {
+        // ideal scenario... >= node v0.11.x
+        // every even entry is a "key", every odd entry is a "value"
+        var key = null;
+        obj.rawHeaders.forEach(function(v) {
+            if (key === null) {
+                key = v;
+            } else {
+                fn(key, v);
+                key = null;
+            }
+        });
+    } else {
+        // otherwise we can *only* proxy the header names as lowercase'd
+        var headers = obj.headers;
+        if (!headers) return;
+        Object.keys(headers).forEach(function(key) {
+            var value = headers[key];
+            if (Array.isArray(value)) {
+                // set-cookie
+                value.forEach(function(val) {
+                    fn(key, val);
+                });
+            } else {
+                fn(key, value);
+            }
+        });
+    }
 }
 
 /**
@@ -113,206 +117,206 @@ function eachHeader(obj, fn) {
  */
 
 function onrequest(req, res) {
-	debug.request('%s %s HTTP/%s ', req.method, req.url, req.httpVersion);
-	var server = this;
-	var socket = req.socket;
+    debug.request('%s %s HTTP/%s ', req.method, req.url, req.httpVersion);
+    var server = this;
+    var socket = req.socket;
 
-	// pause the socket during authentication so no data is lost
-	socket.pause();
+    // pause the socket during authentication so no data is lost
+    socket.pause();
 
-	authenticate(server, req, function (err, auth, u) {
-		socket.resume();
-		if (err) {
-			// an error occured during login!
-			res.writeHead(500);
-			res.end((err.stack || err.message || err) + '\n');
-			return;
-		}
-		if (!auth) return requestAuthorization(req, res);
-		user = u;
-		var parsed = url.parse(req.url);
+    authenticate(server, req, function(err, auth, u) {
+        socket.resume();
+        if (err) {
+            // an error occured during login!
+            res.writeHead(500);
+            res.end((err.stack || err.message || err) + '\n');
+            return;
+        }
+        if (!auth) return requestAuthorization(req, res);
+        user = u;
+        var parsed = url.parse(req.url);
 
-		// proxy the request HTTP method
-		parsed.method = req.method;
+        // proxy the request HTTP method
+        parsed.method = req.method;
 
-		// setup outbound proxy request HTTP headers
-		var headers = {};
-		var hasXForwardedFor = false;
-		var hasVia = false;
-		var via = '1.1 ' + hostname + ' (proxy/' + version + ')';
+        // setup outbound proxy request HTTP headers
+        var headers = {};
+        var hasXForwardedFor = false;
+        var hasVia = false;
+        var via = '1.1 ' + hostname + ' (proxy/' + version + ')';
 
-		parsed.headers = headers;
-		eachHeader(req, function (key, value) {
-			debug.request('Request Header: "%s: %s"', key, value);
-			var keyLower = key.toLowerCase();
+        parsed.headers = headers;
+        eachHeader(req, function(key, value) {
+            debug.request('Request Header: "%s: %s"', key, value);
+            var keyLower = key.toLowerCase();
 
-			if (!hasXForwardedFor && 'x-forwarded-for' === keyLower) {
-				// append to existing "X-Forwarded-For" header
-				// http://en.wikipedia.org/wiki/X-Forwarded-For
-				hasXForwardedFor = true;
-				value += ', ' + socket.remoteAddress;
-				debug.proxyRequest(
-					'appending to existing "%s" header: "%s"',
-					key,
-					value
-				);
-			}
+            if (!hasXForwardedFor && 'x-forwarded-for' === keyLower) {
+                // append to existing "X-Forwarded-For" header
+                // http://en.wikipedia.org/wiki/X-Forwarded-For
+                hasXForwardedFor = true;
+                value += ', ' + socket.remoteAddress;
+                debug.proxyRequest(
+                    'appending to existing "%s" header: "%s"',
+                    key,
+                    value
+                );
+            }
 
-			if (!hasVia && 'via' === keyLower) {
-				// append to existing "Via" header
-				hasVia = true;
-				value += ', ' + via;
-				debug.proxyRequest(
-					'appending to existing "%s" header: "%s"',
-					key,
-					value
-				);
-			}
+            if (!hasVia && 'via' === keyLower) {
+                // append to existing "Via" header
+                hasVia = true;
+                value += ', ' + via;
+                debug.proxyRequest(
+                    'appending to existing "%s" header: "%s"',
+                    key,
+                    value
+                );
+            }
 
-			if (isHopByHop.test(key)) {
-				debug.proxyRequest('ignoring hop-by-hop header "%s"', key);
-			} else {
-				var v = headers[key];
-				if (Array.isArray(v)) {
-					v.push(value);
-				} else if (null != v) {
-					headers[key] = [v, value];
-				} else {
-					headers[key] = value;
-				}
-			}
-		});
+            if (isHopByHop.test(key)) {
+                debug.proxyRequest('ignoring hop-by-hop header "%s"', key);
+            } else {
+                var v = headers[key];
+                if (Array.isArray(v)) {
+                    v.push(value);
+                } else if (null != v) {
+                    headers[key] = [v, value];
+                } else {
+                    headers[key] = value;
+                }
+            }
+        });
 
-		// add "X-Forwarded-For" header if it's still not here by now
-		// http://en.wikipedia.org/wiki/X-Forwarded-For
-		if (!hasXForwardedFor) {
-			headers['X-Forwarded-For'] = socket.remoteAddress;
-			debug.proxyRequest(
-				'adding new "X-Forwarded-For" header: "%s"',
-				headers['X-Forwarded-For']
-			);
-		}
+        // add "X-Forwarded-For" header if it's still not here by now
+        // http://en.wikipedia.org/wiki/X-Forwarded-For
+        if (!hasXForwardedFor) {
+            headers['X-Forwarded-For'] = socket.remoteAddress;
+            debug.proxyRequest(
+                'adding new "X-Forwarded-For" header: "%s"',
+                headers['X-Forwarded-For']
+            );
+        }
 
-		// add "Via" header if still not set by now
-		if (!hasVia) {
-			headers.Via = via;
-			debug.proxyRequest('adding new "Via" header: "%s"', headers.Via);
-		}
+        // add "Via" header if still not set by now
+        if (!hasVia) {
+            headers.Via = via;
+            debug.proxyRequest('adding new "Via" header: "%s"', headers.Via);
+        }
 
-		// custom `http.Agent` support, set `server.agent`
-		var agent = server.agent;
-		if (null != agent) {
-			debug.proxyRequest(
-				'setting custom `http.Agent` option for proxy request: %s',
-				agent
-			);
-			parsed.agent = agent;
-			agent = null;
-		}
+        // custom `http.Agent` support, set `server.agent`
+        var agent = server.agent;
+        if (null != agent) {
+            debug.proxyRequest(
+                'setting custom `http.Agent` option for proxy request: %s',
+                agent
+            );
+            parsed.agent = agent;
+            agent = null;
+        }
 
-		if (null == parsed.port) {
-			// default the port number if not specified, for >= node v0.11.6...
-			// https://github.com/joyent/node/issues/6199
-			parsed.port = 80;
-		}
+        if (null == parsed.port) {
+            // default the port number if not specified, for >= node v0.11.6...
+            // https://github.com/joyent/node/issues/6199
+            parsed.port = 80;
+        }
 
-		if ('http:' != parsed.protocol) {
-			// only "http://" is supported, "https://" should use CONNECT method
-			res.writeHead(400);
-			res.end('Only "http:" protocol prefix is supported\n');
-			return;
-		}
+        if ('http:' != parsed.protocol) {
+            // only "http://" is supported, "https://" should use CONNECT method
+            res.writeHead(400);
+            res.end('Only "http:" protocol prefix is supported\n');
+            return;
+        }
 
-		if (server.localAddress) {
-			parsed.localAddress = server.localAddress;
-		}
+        if (server.localAddress) {
+            parsed.localAddress = server.localAddress;
+        }
 
-		var gotResponse = false;
-		var proxyReq = http.request(parsed);
-		debug.proxyRequest('%s %s HTTP/1.1 ', proxyReq.method, proxyReq.path);
+        var gotResponse = false;
+        var proxyReq = http.request(parsed);
+        debug.proxyRequest('%s %s HTTP/1.1 ', proxyReq.method, proxyReq.path);
 
-		proxyReq.on('response', function (proxyRes) {
-			debug.proxyResponse('HTTP/1.1 %s', proxyRes.statusCode);
-			gotResponse = true;
+        proxyReq.on('response', function(proxyRes) {
+            debug.proxyResponse('HTTP/1.1 %s', proxyRes.statusCode);
+            gotResponse = true;
 
-			var headers = {};
-			eachHeader(proxyRes, function (key, value) {
-				debug.proxyResponse(
-					'Proxy Response Header: "%s: %s"',
-					key,
-					value
-				);
-				if (isHopByHop.test(key)) {
-					debug.response('ignoring hop-by-hop header "%s"', key);
-				} else {
-					var v = headers[key];
-					if (Array.isArray(v)) {
-						v.push(value);
-					} else if (null != v) {
-						headers[key] = [v, value];
-					} else {
-						headers[key] = value;
-					}
-				}
-			});
+            var headers = {};
+            eachHeader(proxyRes, function(key, value) {
+                debug.proxyResponse(
+                    'Proxy Response Header: "%s: %s"',
+                    key,
+                    value
+                );
+                if (isHopByHop.test(key)) {
+                    debug.response('ignoring hop-by-hop header "%s"', key);
+                } else {
+                    var v = headers[key];
+                    if (Array.isArray(v)) {
+                        v.push(value);
+                    } else if (null != v) {
+                        headers[key] = [v, value];
+                    } else {
+                        headers[key] = value;
+                    }
+                }
+            });
 
-			debug.response('HTTP/1.1 %s', proxyRes.statusCode);
-			res.writeHead(proxyRes.statusCode, headers);
-			proxyRes.on('data', (data) => {
-				console.log('UP2', user?.username, data.byteLength);
-			});
-			proxyRes.pipe(res);
-			res.on('finish', onfinish);
-		});
-		proxyReq.on('error', function (err) {
-			debug.proxyResponse(
-				'proxy HTTP request "error" event\n%s',
-				err.stack || err
-			);
-			cleanup();
-			if (gotResponse) {
-				debug.response(
-					'already sent a response, just destroying the socket...'
-				);
-				socket.destroy();
-			} else if ('ENOTFOUND' == err.code) {
-				debug.response('HTTP/1.1 404 Not Found');
-				res.writeHead(404);
-				res.end();
-			} else {
-				debug.response('HTTP/1.1 500 Internal Server Error');
-				res.writeHead(500);
-				res.end();
-			}
-		});
+            debug.response('HTTP/1.1 %s', proxyRes.statusCode);
+            res.writeHead(proxyRes.statusCode, headers);
+            proxyRes.on('data', (data) => {
+                debug('UP2', user?.username, data.byteLength);
+            });
+            proxyRes.pipe(res);
+            res.on('finish', onfinish);
+        });
+        proxyReq.on('error', function(err) {
+            debug.proxyResponse(
+                'proxy HTTP request "error" event\n%s',
+                err.stack || err
+            );
+            cleanup();
+            if (gotResponse) {
+                debug.response(
+                    'already sent a response, just destroying the socket...'
+                );
+                socket.destroy();
+            } else if ('ENOTFOUND' == err.code) {
+                debug.response('HTTP/1.1 404 Not Found');
+                res.writeHead(404);
+                res.end();
+            } else {
+                debug.response('HTTP/1.1 500 Internal Server Error');
+                res.writeHead(500);
+                res.end();
+            }
+        });
 
-		// if the client closes the connection prematurely,
-		// then close the upstream socket
-		function onclose() {
-			debug.request(
-				'client socket "close" event, aborting HTTP request to "%s"',
-				req.url
-			);
-			proxyReq.abort();
-			cleanup();
-		}
-		socket.on('close', onclose);
+        // if the client closes the connection prematurely,
+        // then close the upstream socket
+        function onclose() {
+            debug.request(
+                'client socket "close" event, aborting HTTP request to "%s"',
+                req.url
+            );
+            proxyReq.abort();
+            cleanup();
+        }
+        socket.on('close', onclose);
 
-		function onfinish() {
-			debug.response('"finish" event');
-			cleanup();
-		}
+        function onfinish() {
+            debug.response('"finish" event');
+            cleanup();
+        }
 
-		function cleanup() {
-			debug.response('cleanup');
-			socket.removeListener('close', onclose);
-			res.removeListener('finish', onfinish);
-		}
-		req.on('data', (data) => {
-			console.log('DN2', user?.username, data.byteLength);
-		});
-		req.pipe(proxyReq);
-	});
+        function cleanup() {
+            debug.response('cleanup');
+            socket.removeListener('close', onclose);
+            res.removeListener('finish', onfinish);
+        }
+        req.on('data', (data) => {
+            debug('DN2', user?.username, data.byteLength);
+        });
+        req.pipe(proxyReq);
+    });
 }
 
 /**
@@ -320,139 +324,147 @@ function onrequest(req, res) {
  */
 
 function onconnect(req, socket, head) {
-	debug.request('%s %s HTTP/%s ', req.method, req.url, req.httpVersion);
-	assert(
-		!head || 0 == head.length,
-		'"head" should be empty for proxy requests'
-	);
+    debug.request('%s %s HTTP/%s ', req.method, req.url, req.httpVersion);
+    assert(!head || 0 == head.length,
+        '"head" should be empty for proxy requests'
+    );
 
-	var res;
-	var target;
-	var gotResponse = false;
-	var user;
+    var server = this;
+    var res;
+    var target;
+    var gotResponse = false;
+    var user;
 
-	// define request socket event listeners
-	socket.on('close', function onclientclose() {
-		debug.request('HTTP request %s socket "close" event', req.url);
-	});
+    // define request socket event listeners
+    socket.on('close', function onclientclose() {
+        debug.request('HTTP request %s socket "close" event', req.url);
+    });
 
-	socket.on('end', function onclientend() {
-		debug.request('HTTP request %s socket "end" event', req.url);
-	});
+    socket.on('end', function onclientend() {
+        debug.request('HTTP request %s socket "end" event', req.url);
+    });
 
-	socket.on('error', function onclienterror(err) {
-		debug.request(
-			'HTTP request %s socket "error" event:\n%s',
-			req.url,
-			err.stack || err
-		);
-	});
+    socket.on('error', function onclienterror(err) {
+        debug.request(
+            'HTTP request %s socket "error" event:\n%s',
+            req.url,
+            err.stack || err
+        );
+    });
 
-	// define target socket event listeners
-	function ontargetclose() {
-		debug.proxyResponse('proxy target %s "close" event', req.url);
-		socket.destroy();
-	}
+    // define target socket event listeners
+    function ontargetclose() {
+        debug.proxyResponse('proxy target %s "close" event', req.url);
+        socket.destroy();
+    }
 
-	function ontargetend() {
-		debug.proxyResponse('proxy target %s "end" event', req.url);
-	}
+    function ontargetend() {
+        debug.proxyResponse('proxy target %s "end" event', req.url);
+    }
 
-	function ontargeterror(err) {
-		debug.proxyResponse(
-			'proxy target %s "error" event:\n%s',
-			req.url,
-			err.stack || err
-		);
-		if (gotResponse) {
-			debug.response(
-				'already sent a response, just destroying the socket...'
-			);
-			socket.destroy();
-		} else if ('ENOTFOUND' == err.code) {
-			debug.response('HTTP/1.1 404 Not Found');
-			res.writeHead(404);
-			res.end();
-		} else {
-			debug.response('HTTP/1.1 500 Internal Server Error');
-			res.writeHead(500);
-			res.end();
-		}
-	}
+    function ontargeterror(err) {
+        debug.proxyResponse(
+            'proxy target %s "error" event:\n%s',
+            req.url,
+            err.stack || err
+        );
+        if (gotResponse) {
+            debug.response(
+                'already sent a response, just destroying the socket...'
+            );
+            socket.destroy();
+        } else if ('ENOTFOUND' == err.code) {
+            debug.response('HTTP/1.1 404 Not Found');
+            res.writeHead(404);
+            res.end();
+        } else {
+            debug.response('HTTP/1.1 500 Internal Server Error');
+            res.writeHead(500);
+            res.end();
+        }
+    }
 
-	function ontargetconnect() {
-		debug.proxyResponse('proxy target %s "connect" event', req.url);
-		debug.response('HTTP/1.1 200 Connection established');
-		gotResponse = true;
-		res.removeListener('finish', onfinish);
+    function ontargetconnect() {
+        debug.proxyResponse('proxy target %s "connect" event', req.url);
+        debug.response('HTTP/1.1 200 Connection established');
+        gotResponse = true;
+        res.removeListener('finish', onfinish);
 
-		res.writeHead(200, 'Connection established');
-		res.flushHeaders();
+        res.writeHead(200, 'Connection established');
+        res.flushHeaders();
 
-		// relinquish control of the `socket` from the ServerResponse instance
-		res.detachSocket(socket);
+        // relinquish control of the `socket` from the ServerResponse instance
+        res.detachSocket(socket);
 
-		// nullify the ServerResponse object, so that it can be cleaned
-		// up before this socket proxying is completed
-		res = null;
+        // nullify the ServerResponse object, so that it can be cleaned
+        // up before this socket proxying is completed
+        res = null;
 
-		socket.on('data', (data) => {
-			console.log('UP', user?.username, data.byteLength);
-		});
-		target.on('data', (data) => {
-			console.log('DN', user?.username, data.byteLength);
-		});
-		socket.pipe(target);
-		target.pipe(socket);
-	}
+        socket.on('data', (data) => {
+            user.usage = user.usage + data.byteLength;
+            debug('UP', user?.username, user.usage);
+        });
+        target.on('data', (data) => {
+            user.usage = user.usage + data.byteLength;
+            debug('DN', user?.username, user.usage);
+        });
+        socket.pipe(target);
+        target.pipe(socket);
+    }
 
-	// create the `res` instance for this request since Node.js
-	// doesn't provide us with one :(
-	// XXX: this is undocumented API, so it will break some day (ノಠ益ಠ)ノ彡┻━┻
-	res = new http.ServerResponse(req);
-	res.shouldKeepAlive = false;
-	res.chunkedEncoding = false;
-	res.useChunkedEncodingByDefault = false;
-	res.assignSocket(socket);
+    // create the `res` instance for this request since Node.js
+    // doesn't provide us with one :(
+    // XXX: this is undocumented API, so it will break some day (ノಠ益ಠ)ノ彡┻━┻
+    res = new http.ServerResponse(req);
+    res.shouldKeepAlive = false;
+    res.chunkedEncoding = false;
+    res.useChunkedEncodingByDefault = false;
+    res.assignSocket(socket);
 
-	// called for the ServerResponse's "finish" event
-	// XXX: normally, node's "http" module has a "finish" event listener that would
-	// take care of closing the socket once the HTTP response has completed, but
-	// since we're making this ServerResponse instance manually, that event handler
-	// never gets hooked up, so we must manually close the socket...
-	function onfinish() {
-		debug.response('response "finish" event');
-		res.detachSocket(socket);
-		socket.end();
-	}
-	res.once('finish', onfinish);
+    // called for the ServerResponse's "finish" event
+    // XXX: normally, node's "http" module has a "finish" event listener that would
+    // take care of closing the socket once the HTTP response has completed, but
+    // since we're making this ServerResponse instance manually, that event handler
+    // never gets hooked up, so we must manually close the socket...
+    function onfinish() {
+        debug.response('response "finish" event');
+        res.detachSocket(socket);
+        socket.end();
+    }
+    res.once('finish', onfinish);
 
-	// pause the socket during authentication so no data is lost
-	socket.pause();
+    // pause the socket during authentication so no data is lost
+    socket.pause();
 
-	authenticate(this, req, function (err, auth, u) {
-		socket.resume();
-		if (err) {
-			// an error occured during login!
-			res.writeHead(500);
-			res.end((err.stack || err.message || err) + '\n');
-			return;
-		}
-		if (!auth) return requestAuthorization(req, res);
+    authenticate(this, req, function(err, auth, u) {
+        socket.resume();
+        if (err) {
+            // an error occured during login!
+            res.writeHead(500);
+            res.end((err.stack || err.message || err) + '\n');
+            return;
+        }
+        if (!auth) return requestAuthorization(req, res);
 
-		user = u;
-		var parts = req.url.split(':');
-		var host = parts[0];
-		var port = +parts[1];
-		var opts = { host: host, port: port };
-
-		debug.proxyRequest('connecting to proxy target %j', opts);
-		target = net.connect(opts);
-		target.on('connect', ontargetconnect);
-		target.on('close', ontargetclose);
-		target.on('error', ontargeterror);
-		target.on('end', ontargetend);
-	});
+        user = u;
+        var parts = req.url.split(':');
+        var host = parts[0];
+        var port = +parts[1];
+        var opts = { host: host, port: port };
+        // if (server.localAddress) {
+        //     opts.localAddress = server.localAddress;
+        // }
+        if (remoteBindings.length > 0) {
+            const rndInt = Math.floor(Math.random() * remoteBindings.length);
+            opts.localAddress = remoteBindings[rndInt];
+        }
+        debug.proxyRequest('connecting to proxy target %j', opts);        
+        target = net.connect(opts);
+        target.on('connect', ontargetconnect);
+        target.on('close', ontargetclose);
+        target.on('error', ontargeterror);
+        target.on('end', ontargetend);
+    });
 }
 
 /**
@@ -466,32 +478,37 @@ function onconnect(req, socket, head) {
  */
 
 function authenticate(server, req, fn) {
-	if (req.connection.remoteAddress == '127.0.0.1') {
-		return fn(null, true, {username: 'server'});
-	}
-	var auth = req.headers['proxy-authorization'];
-	if (!auth) {
-		// optimization: don't invoke the child process if no
-		// "Proxy-Authorization" header was given
-		return fn(null, false);
-	}
-	var parsed = basicAuthParser(auth);
-	debug('parsed "Proxy-Authorization": %j', parsed);
-	let userIndex = users.findIndex((s) => s.username == parsed.username && s.password == parsed.password);
-	if (userIndex === -1) {
-		return fn(null, false); 
-	}
-	user = users[userIndex];
-	return fn(null, true, user);
+    // if (req.connection.remoteAddress == '192.168.0.117') {
+    //     return fn(null, true, { username: 'server', usage: 0 });
+    // }
+    let staticUser = users.findIndex((s) => s.staticIP == req.connection.remoteAddress);
+    if (staticUser !== -1) {
+        user = users[staticUser];
+        return fn(null, true, user);
+    }
+    var auth = req.headers['proxy-authorization'];
+    if (!auth) {
+        // optimization: don't invoke the child process if no
+        // "Proxy-Authorization" header was given
+        return fn(null, false);
+    }
+    var parsed = basicAuthParser(auth);
+    debug('parsed "Proxy-Authorization": %j', parsed);
+    let userIndex = users.findIndex((s) => s.username == parsed.username && s.password == parsed.password);
+    if (userIndex === -1) {
+        return fn(null, false);
+    }
+    user = users[userIndex];
+    return fn(null, true, user);
 
-	// var hasAuthenticate = 'function' == typeof server.authenticate;
-	// if (hasAuthenticate) {
-	// 	debug.request('authenticating request "%s %s"', req.method, req.url);
-	// 	server.authenticate(req, fn);
-	// } else {
-	// 	// no `server.authenticate()` function, so just allow the request
-	// 	fn(null, true);
-	// }
+    // var hasAuthenticate = 'function' == typeof server.authenticate;
+    // if (hasAuthenticate) {
+    // 	debug.request('authenticating request "%s %s"', req.method, req.url);
+    // 	server.authenticate(req, fn);
+    // } else {
+    // 	// no `server.authenticate()` function, so just allow the request
+    // 	fn(null, true);
+    // }
 }
 
 
@@ -502,20 +519,26 @@ function authenticate(server, req, fn) {
  */
 
 function requestAuthorization(req, res) {
-	// request Basic proxy authorization
-	debug.response(
-		'requesting proxy authorization for "%s %s"',
-		req.method,
-		req.url
-	);
+    // request Basic proxy authorization
+    debug.response(
+        'requesting proxy authorization for "%s %s"',
+        req.method,
+        req.url
+    );
 
-	// TODO: make "realm" and "type" (Basic) be configurable...
-	var realm = 'INPROC proxy server authorization';
+    // TODO: make "realm" and "type" (Basic) be configurable...
+    var realm = 'INPROC proxy server authorization';
 
-	var headers = {
-		'Proxy-Authenticate': 'Basic realm="' + realm + '"',
-		'Server': 'Proxy'
-	};
-	res.writeHead(407, headers);
-	res.end();
+    var headers = {
+        'Proxy-Authenticate': 'Basic realm="' + realm + '"',
+        'Server': 'Proxy'
+    };
+    res.writeHead(407, headers);
+    res.end();
 }
+
+setInterval(() => {
+    let  stats = users.map((s) =>{ return {username: s.username, usage: s.usage} });
+    let json = JSON.stringify(stats);
+    fs.writeFileSync('./bin/usage/users-stats.json', json, 'utf8');    
+}, 30000);

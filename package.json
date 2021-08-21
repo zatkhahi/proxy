@@ -5,7 +5,9 @@
   "main": "proxy.js",
   "scripts": {
     "test": "mocha --reporter spec",
-    "start": "node ./bin/proxy.js"
+    "start": "node ./bin/proxy.js",
+    "service": "node ./bin/proxy-service.js",
+    "local": "node ./bin/proxy.js --local-address=192.168.0.117"
   },
   "bin": "./bin/proxy.js",
   "keywords": [
